@@ -36,6 +36,9 @@ from vllm.model_executor.layers.fused_moe.fused_moe_modular_method import (
 from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
     init_aiter_topK_meta_data,
 )
+from vllm.model_executor.layers.fused_moe.router.adaptive_routing_router import (
+    AdaptiveRoutingRouter,
+)
 from vllm.model_executor.layers.fused_moe.router.router_factory import (
     create_fused_moe_router,
 )
@@ -515,6 +518,11 @@ class FusedMoE(CustomOp):
         # Note: get_quant_method will look at the layer's local_num_experts
         # for heuristic purposes, so it must be initialized first.
         self.quant_method: FusedMoEMethodBase = _get_quant_method()
+
+        # Adaptive-compute K policies need the router path and TP/DP for
+        # above-native K; fail closed here, where the kernel is known.
+        if isinstance(self.router, AdaptiveRoutingRouter):
+            self.router.check_layer(self)
 
         if not self.moe_config.is_act_and_mul and not current_platform.is_cuda_alike():
             raise NotImplementedError(

@@ -7,6 +7,10 @@ import torch
 import vllm.envs as envs
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
+from vllm.model_executor.layers.fused_moe.router.adaptive_routing_router import (
+    build_adaptive_router,
+    requested_policy,
+)
 from vllm.model_executor.layers.fused_moe.router.custom_routing_router import (
     CustomRoutingRouter,
 )
@@ -30,6 +34,59 @@ EMPTY_EPLB_STATE: EplbLayerState = EplbLayerState()
 
 
 def create_fused_moe_router(
+    # common parameters
+    top_k: int,
+    global_num_experts: int,
+    renormalize: bool = True,
+    indices_type_getter: Callable[[], torch.dtype | None] | None = None,
+    # grouped topk parameters
+    use_grouped_topk: bool = False,
+    num_expert_group: int | None = None,
+    topk_group: int | None = None,
+    scoring_func: str = "softmax",
+    num_fused_shared_experts: int = 0,
+    # grouped topk + fused topk bias parameters
+    routed_scaling_factor: float = 1.0,
+    e_score_correction_bias: torch.Tensor | None = None,
+    # custom routing parameters
+    custom_routing_function: Callable | None = None,
+    # eplb parameters
+    enable_eplb: bool = False,
+    eplb_state: EplbLayerState = EMPTY_EPLB_STATE,
+) -> FusedMoERouter:
+    """
+    Create the router for a FusedMoE layer.
+
+    When ``ADAPTIVE_ROUTING_POLICY`` requests a non-native K policy, the router
+    that :func:`_create_inner_router` would build is wrapped in an
+    :class:`AdaptiveRoutingRouter` that emits ``[M, K]`` tensors (real reduced
+    dispatch). Otherwise this is :func:`_create_inner_router`.
+    """
+    kwargs = dict(
+        top_k=top_k,
+        global_num_experts=global_num_experts,
+        renormalize=renormalize,
+        indices_type_getter=indices_type_getter,
+        use_grouped_topk=use_grouped_topk,
+        num_expert_group=num_expert_group,
+        topk_group=topk_group,
+        scoring_func=scoring_func,
+        num_fused_shared_experts=num_fused_shared_experts,
+        routed_scaling_factor=routed_scaling_factor,
+        e_score_correction_bias=e_score_correction_bias,
+        custom_routing_function=custom_routing_function,
+        enable_eplb=enable_eplb,
+        eplb_state=eplb_state,
+    )
+    policy = requested_policy()
+    if policy is None or policy.kind == "native":
+        return _create_inner_router(**kwargs)
+    return build_adaptive_router(
+        policy=policy, inner_factory=_create_inner_router, **kwargs
+    )
+
+
+def _create_inner_router(
     # common parameters
     top_k: int,
     global_num_experts: int,
