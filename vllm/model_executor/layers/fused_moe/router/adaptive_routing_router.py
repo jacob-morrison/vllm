@@ -20,7 +20,9 @@ with expert parallelism would overflow all-to-all buffers sized from the config 
 from __future__ import annotations
 
 import atexit
+import contextlib
 import os
+import sys
 from collections.abc import Callable
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
@@ -78,8 +80,16 @@ def _get_tracker() -> Any:
 
 
 def _log_summary() -> None:
-    if _tracker is not None and _tracker.tokens:
-        logger.info("%s", _tracker.summary())
+    if _tracker is None or not _tracker.tokens:
+        return
+    summary = _tracker.summary()
+    # Log streams may already be closed at interpreter exit.
+    with contextlib.suppress(Exception):
+        logger.info("%s", summary)
+    with contextlib.suppress(Exception):
+        if sys.__stderr__ is not None and not sys.__stderr__.closed:
+            sys.__stderr__.write(summary + "\n")
+            sys.__stderr__.flush()
 
 
 def build_spec(
