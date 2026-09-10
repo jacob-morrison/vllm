@@ -304,9 +304,29 @@ def build_adaptive_router(
             "VLLM_MOE_ROUTING_SIMULATION_STRATEGY"
         )
     if custom_routing_function is not None:
+        if getattr(custom_routing_function, "adaptive_routing_aware", False):
+            # The model's own router applies the policy (e.g. the OLMoE3 plugin);
+            # build the plain router and let it return narrow tensors itself.
+            return inner_factory(
+                top_k=top_k,
+                global_num_experts=global_num_experts,
+                renormalize=renormalize,
+                indices_type_getter=indices_type_getter,
+                use_grouped_topk=use_grouped_topk,
+                num_expert_group=num_expert_group,
+                topk_group=topk_group,
+                scoring_func=scoring_func,
+                num_fused_shared_experts=num_fused_shared_experts,
+                routed_scaling_factor=routed_scaling_factor,
+                e_score_correction_bias=e_score_correction_bias,
+                custom_routing_function=custom_routing_function,
+                enable_eplb=enable_eplb,
+                eplb_state=eplb_state,
+            )
         raise RuntimeError(
             "adaptive routing: this model uses a custom routing function; "
-            "no routing spec applies"
+            "no routing spec applies (mark it adaptive_routing_aware if it "
+            "applies the policy itself)"
         )
     spec = build_spec(
         top_k=top_k,
