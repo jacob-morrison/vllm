@@ -4,8 +4,10 @@
 
 Opt-in through the environment (``ADAPTIVE_ROUTING_POLICY`` = ``normalized`` or
 ``reference``, ``ADAPTIVE_ROUTING_K``; see the ``adaptive_routing`` package for the
-full list). When active, ``create_fused_moe_router`` wraps the router it would have
-built in an :class:`AdaptiveRoutingRouter`, which returns ``[M, K]`` tensors for the
+full list; ``ADAPTIVE_ROUTING_FROM_LOGITS=1`` forces re-selection from the logits
+instead of the post-hoc transform of the inner router's rows). When active,
+``create_fused_moe_router`` wraps the router it would have built in an
+:class:`AdaptiveRoutingRouter`, which returns ``[M, K]`` tensors for the
 requested K. The fused-experts kernels read K from the tensor width, so fewer
 experts are actually dispatched; the weights follow the policy (renormalized over
 the K survivors, or the native-K denominator kept).
@@ -178,10 +180,13 @@ class AdaptiveRoutingRouter(BaseRouter):
         self.policy = policy
         self.e_score_correction_bias = e_score_correction_bias
         self.native_k = spec.native_k
-        self.use_logits_path = not (
-            isinstance(inner, FusedTopKRouter)
-            and spec.renormalize
-            and not spec.selection_bias
+        self.use_logits_path = (
+            not (
+                isinstance(inner, FusedTopKRouter)
+                and spec.renormalize
+                and not spec.selection_bias
+            )
+            or os.environ.get("ADAPTIVE_ROUTING_FROM_LOGITS", "0") == "1"
         )
         self.expected_width = max(self.k, self.native_k) if policy.masked else self.k
         self.layer_index = AdaptiveRoutingRouter._layer_counter
