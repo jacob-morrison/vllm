@@ -75,6 +75,15 @@ TRITON_BACKENDS = (
 )
 
 
+def _adaptive_routing_active() -> bool:
+    """True when the adaptive-routing policy env var is set (see
+    router/adaptive_routing_router.py); monolithic MoE kernels route inside
+    the kernel and cannot honor it."""
+    import os
+
+    return bool(os.environ.get("ADAPTIVE_ROUTING_POLICY"))
+
+
 def backend_to_kernel_cls(
     backend: Mxfp4MoeBackend,
 ) -> list[type[mk.FusedMoEExperts]]:
@@ -88,6 +97,9 @@ def backend_to_kernel_cls(
         )
 
         # NOTE: prefer Monolithic > Modular, so return Monolithic first.
+        # Adaptive routing needs the router to run outside the kernel.
+        if _adaptive_routing_active():
+            return [TrtLlmMxfp4ExpertsModular]
         return [TrtLlmMxfp4ExpertsMonolithic, TrtLlmMxfp4ExpertsModular]
 
     elif backend in (
@@ -107,6 +119,10 @@ def backend_to_kernel_cls(
         )
 
         # NOTE: prefer Monolithic > Modular, so return Monolithic first.
+        # Adaptive routing needs the router to run outside the kernel; the
+        # modular kernel takes the dispatch width from topk_ids.
+        if _adaptive_routing_active():
+            return [OAITritonExperts]
         return [OAITritonMxfp4ExpertsMonolithic, OAITritonExperts]
 
     elif backend == Mxfp4MoeBackend.TRITON_UNFUSED:
