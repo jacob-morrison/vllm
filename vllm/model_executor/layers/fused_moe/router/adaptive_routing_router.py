@@ -8,7 +8,8 @@ full list; ``ADAPTIVE_ROUTING_FROM_LOGITS=1`` forces re-selection from the logit
 instead of the post-hoc transform of the inner router's rows). When active,
 ``create_fused_moe_router`` wraps the router it would have built in an
 :class:`AdaptiveRoutingRouter`, which returns ``[M, K]`` tensors for the
-requested K. The fused-experts kernels read K from the tensor width, so fewer
+requested K (or ``ADAPTIVE_ROUTING_WIDTH`` columns with zero-weight padding beyond K, for
+kernels that need a power-of-two width). The fused-experts kernels read K from the tensor width, so fewer
 experts are actually dispatched; the weights follow the policy (renormalized over
 the K survivors, or the native-K denominator kept).
 
@@ -198,7 +199,7 @@ class AdaptiveRoutingRouter(BaseRouter):
             )
             or os.environ.get("ADAPTIVE_ROUTING_FROM_LOGITS", "0") == "1"
         )
-        self.expected_width = max(self.k, self.native_k) if policy.masked else self.k
+        self.expected_width = policy.dispatch_width(spec)
         self.layer_index = AdaptiveRoutingRouter._layer_counter
         AdaptiveRoutingRouter._layer_counter += 1
         self.calls = 0
@@ -350,7 +351,7 @@ def build_adaptive_router(
         topk_group=topk_group,
     )
     k = policy.resolve_k(spec)
-    width = max(k, spec.native_k, top_k)
+    width = max(k, spec.native_k, top_k, policy.dispatch_width(spec))
     inner = inner_factory(
         top_k=width,
         global_num_experts=global_num_experts,
