@@ -195,6 +195,87 @@ def legacy_routing(
     )
 
 
+# ---------------------------------------------------------------------------
+# Adaptive routing on the stock (monolithic) gpt-oss kernel (2026-09-13).
+# The kernel computes its own routing (top-k + softmax over the selected experts), so the
+# FusedMoE router wrapper never runs here. Instead the policy is applied between the kernel's
+# top-k and its routing-data build: select W experts (W = the requested dispatch width, a power
+# of two >= K), zero the weights ranked beyond K, and rescale each token's weights so that
+#   reference : w_i = exp(l_i) / Z_native   (native-K denominator; K=2/8 at real width, 3/5/6/7 padded)
+#   normalized: w_i = exp(l_i) / Z_K        (renormalized over the K kept)
+# Z_j is the sum of exp over the top-j logits (computed in float32 from the same logits). With
+# K == native K the weights are unchanged, so that condition reproduces native exactly.
+# Enabled by ADAPTIVE_ROUTING_POLICY (see adaptive_routing.env); ADAPTIVE_ROUTING_MODULAR=1 keeps
+# the older modular-kernel path instead.
+_INKERNEL_POLICY: tuple | None | bool = False  # False = not resolved yet
+_INKERNEL_LOGGED = False
+
+
+def _inkernel_policy():
+    """(policy, native_k override, width) when the stock-kernel policy path is active, else None."""
+    global _INKERNEL_POLICY
+    if _INKERNEL_POLICY is not False:
+        return _INKERNEL_POLICY
+    import os
+
+    _INKERNEL_POLICY = None
+    if os.environ.get("ADAPTIVE_ROUTING_POLICY") and os.environ.get("ADAPTIVE_ROUTING_MODULAR", "0") != "1":
+        from adaptive_routing.env import policy_from_env, spec_overrides_from_env
+
+        policy = policy_from_env()
+        if policy is not None and policy.kind != "native":
+            overrides = spec_overrides_from_env()
+            _INKERNEL_POLICY = (policy, overrides.get("native_k"))
+    return _INKERNEL_POLICY
+
+
+def adaptive_routing_from_logits(
+    logits: torch.Tensor,
+    native_k: int,
+    n_expts_tot: int,
+    sm_first: bool,
+    policy,
+) -> tuple["RoutingData", "GatherIndx", "ScatterIndx", int]:
+    """Stock-kernel routing with the adaptive policy applied; returns routing data and the width."""
+    global _INKERNEL_LOGGED
+    if sm_first:
+        raise RuntimeError("adaptive routing (in-kernel): softmax-first routing is not a renormalizing family")
+    k = policy.k if policy.k is not None else native_k
+    width = policy.width if policy.width is not None else k
+    if width < k or (width & (width - 1)):
+        raise RuntimeError(f"adaptive routing (in-kernel): dispatch width {width} must be a power of two >= K={k}; set ADAPTIVE_ROUTING_WIDTH")
+    sparse = topk(logits, width, apply_softmax=True)  # vals = exp(l) / Z_width over the selected experts
+    vals = sparse.vals
+    v = vals.to(torch.float32)
+    order = v.argsort(dim=-1, descending=True)
+    rank = order.argsort(dim=-1)
+    keep = (rank < k).to(v.dtype)
+    lf = logits.to(torch.float32)
+    m = lf.max(dim=-1, keepdim=True).values
+    top = (lf - m).topk(max(width, native_k, k), dim=-1).values.exp()  # descending
+    z_width = top[:, :width].sum(dim=-1, keepdim=True)
+    if policy.kind == "reference":
+        z_ref = top[:, :native_k].sum(dim=-1, keepdim=True)
+    elif policy.kind == "normalized":
+        z_ref = top[:, :k].sum(dim=-1, keepdim=True)
+    else:
+        raise RuntimeError(f"adaptive routing (in-kernel): unsupported policy {policy.kind}")
+    scale = z_width / z_ref.clamp_min(torch.finfo(torch.float32).tiny)
+    new_vals = (v * keep * scale).to(vals.dtype)
+    if not _INKERNEL_LOGGED:
+        _INKERNEL_LOGGED = True
+        finite = bool(torch.isfinite(new_vals).all())
+        logger.info(
+            "adaptive routing (in-kernel, gpt-oss stock kernel): %s K=%d native_k=%d dispatch width %d; "
+            "first batch %d tokens, weights finite=%s, mean kept weight sum %.4f",
+            policy.kind, k, native_k, width, logits.shape[0], finite,
+            float(new_vals.to(torch.float32).sum(dim=-1).mean()),
+        )
+    vals.copy_(new_vals)
+    routing_data, gather_idx, scatter_idx = legacy_routing_from_sparsematrix(sparse, n_expts_tot, width)
+    return routing_data, gather_idx, scatter_idx, width
+
+
 def triton_kernel_moe_forward(
     hidden_states: torch.Tensor,
     w1,  # Tensor or triton_kernels.Tensor
@@ -271,9 +352,20 @@ def triton_kernel_moe_forward(
         effective_expert_map = None
         effective_global_num_experts = local_num_experts
     else:
-        routing_data, gather_idx, scatter_idx = legacy_routing(
-            gating_output, topk, sm_first=not renormalize
-        )
+        inkernel = _inkernel_policy()
+        if inkernel is not None:
+            policy, native_k_override = inkernel
+            routing_data, gather_idx, scatter_idx, topk = adaptive_routing_from_logits(
+                gating_output,
+                native_k_override or topk,
+                gating_output.shape[-1],
+                not renormalize,
+                policy,
+            )
+        else:
+            routing_data, gather_idx, scatter_idx = legacy_routing(
+                gating_output, topk, sm_first=not renormalize
+            )
         effective_expert_map = expert_map
         effective_global_num_experts = global_num_experts
 

@@ -219,6 +219,22 @@ class AdaptiveRoutingRouter(BaseRouter):
 
     def check_layer(self, layer: FusedMoE) -> None:
         """Startup guards that need the layer (called from ``FusedMoE.__init__``)."""
+        backend = getattr(layer.quant_method, "mxfp4_backend", None)
+        if (
+            layer.quant_method.is_monolithic
+            and backend is not None
+            and getattr(backend, "name", str(backend)).startswith("TRITON")
+            and os.environ.get("ADAPTIVE_ROUTING_MODULAR", "0") != "1"
+        ):
+            # gpt-oss stock Triton kernel: the policy is applied inside the kernel path
+            # (gpt_oss_triton_kernels_moe.adaptive_routing_from_logits); this wrapper stays idle.
+            if self.layer_index == 0:
+                logger.info(
+                    "adaptive routing: %s applied in-kernel by the gpt-oss stock Triton "
+                    "kernel; router wrapper idle",
+                    self.policy.describe(self.spec),
+                )
+            return
         if layer.quant_method.is_monolithic:
             raise RuntimeError(
                 "adaptive routing: the MoE kernel is monolithic (routes inside the "

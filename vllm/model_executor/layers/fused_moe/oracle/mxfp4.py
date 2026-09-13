@@ -76,12 +76,15 @@ TRITON_BACKENDS = (
 
 
 def _adaptive_routing_active() -> bool:
-    """True when the adaptive-routing policy env var is set (see
-    router/adaptive_routing_router.py); monolithic MoE kernels route inside
-    the kernel and cannot honor it."""
+    """True when the adaptive-routing policy should be applied by the modular
+    kernel path (ADAPTIVE_ROUTING_POLICY set and ADAPTIVE_ROUTING_MODULAR=1).
+    By default gpt-oss applies the policy inside the stock monolithic Triton
+    kernel path (gpt_oss_triton_kernels_moe.adaptive_routing_from_logits)."""
     import os
 
-    return bool(os.environ.get("ADAPTIVE_ROUTING_POLICY"))
+    return bool(os.environ.get("ADAPTIVE_ROUTING_POLICY")) and os.environ.get(
+        "ADAPTIVE_ROUTING_MODULAR", "0"
+    ) == "1"
 
 
 def backend_to_kernel_cls(
